@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Olist SRE Pipeline - Infraestrutura AWS para ETL de ~100k pedidos/dia (AWS Academy)"
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: "Ambiente de deploy (dev/staging/prod)"
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t3.small
+      - t3.medium
+    Description: "Tipo da instância EC2 para o pipeline"
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+    Description: "Classe da instância RDS Postgres"
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: "Senha do banco Postgres"
+    MinLength: 8
+
+  PipelineEnv:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: "Ambiente do pipeline (define bucket S3 e config)"
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-034324eee88fc03cd
+    Description: "VPC existente (default do AWS Academy)"
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-07d72cb10a1bbd2fb
+    Description: "Subnet para EC2 (us-east-1e)"
+
+  SubnetIdAz2:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0f2e2010ffcaa9546
+    Description: "Subnet em AZ diferente para RDS (us-east-1a)"
+
+  AwsAccessKeyId:
+    Type: String
+    NoEcho: true
+    Description: "AWS Access Key ID para o pipeline acessar S3"
+
+  AwsSecretAccessKey:
+    Type: String
+    NoEcho: true
+    Description: "AWS Secret Access Key para o pipeline acessar S3"
+
+  AwsSessionToken:
+    Type: String
+    NoEcho: true
+    Description: "AWS Session Token para o pipeline acessar S3"
+
+Conditions:
+  IsProd: !Equals [!Ref EnvironmentName, prod]
+
+Resources:
+  # =============================================
+  # Security Groups
+  # =============================================
+  PipelineSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Olist pipeline instance
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: Grafana
+        - IpProtocol: tcp
+          FromPort: 9090
+          ToPort: 9090
+          CidrIp: 0.0.0.0/0
+          Description: Prometheus
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+          Description: Health check
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "olist-${EnvironmentName}-sg"
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group para RDS Postgres
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref PipelineSecurityGroup
+          Description: Postgres do pipeline
+      Tags:
+        - Key: Name
+          Value: !Sub "olist-${EnvironmentName}-rds-sg"
+
+  # =============================================
+  # S3 Buckets (dev, staging, prod)
+  # =============================================
+  S3BucketDev:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "olist-data-dev-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireFailed
+            Status: Enabled
+            Prefix: failed/
+            ExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: "olist-data-dev"
+        - Key: Environment
+          Value: dev
+
+  S3BucketStaging:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "olist-data-staging-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireFailed
+            Status: Enabled
+            Prefix: failed/
+            ExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: "olist-data-staging"
+        - Key: Environment
+          Value: staging
+
+  S3BucketProd:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "olist-data-prod-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireFailed
+            Status: Enabled
+            Prefix: failed/
+            ExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: "olist-data-prod"
+        - Key: Environment
+          Value: prod
+
+  # =============================================
+  # RDS Postgres
+  # =============================================
+  PostgresRDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: olist_analytics
+      Engine: postgres
+      EngineVersion: "14.15"
+      DBInstanceClass: !Ref DBInstanceClass
+      DBInstanceIdentifier: !Sub "olist-${EnvironmentName}-postgres"
+      MasterUsername: olist
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: 20
+      StorageType: gp3
+      BackupRetentionPeriod: !If [IsProd, 7, 1]
+      MultiAZ: !If [IsProd, true, false]
+      DBSubnetGroupName: !Ref PostgresDBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DeletionProtection: !If [IsProd, true, false]
+      Tags:
+        - Key: Name
+          Value: !Sub "olist-${EnvironmentName}-postgres"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PostgresDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS Postgres
+      SubnetIds:
+        - !Ref SubnetId
+        - !Ref SubnetIdAz2
+      Tags:
+        - Key: Name
+          Value: !Sub "olist-${EnvironmentName}-db-subnet-group"
+
+  # =============================================
+  # EC2 Instance (Pipeline + Docker)
+  # =============================================
+  PipelineInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - PostgresRDS
+    Properties:
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref PipelineSecurityGroup
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/olist-bootstrap.log 2>&1
+          set -x
+
+          dnf install -y docker git
+
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          DOCKER_CONFIG=/usr/local/lib/docker/cli-plugins
+          mkdir -p $DOCKER_CONFIG
+          curl -sSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" -o $DOCKER_CONFIG/docker-compose
+          chmod +x $DOCKER_CONFIG/docker-compose
+
+          # Install latest buildx for Docker Compose v2
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -sL 'https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64' -o /usr/local/lib/docker/cli-plugins/docker-buildx
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
+          RDS_ENDPOINT=${PostgresRDS.Endpoint.Address}
+          RDS_PORT=${PostgresRDS.Endpoint.Port}
+
+          mkdir -p /opt/olist-pipeline
+          echo "Crie o diretorio /opt/olist-pipeline com os arquivos do repositorio" > /opt/olist-pipeline/README
+
+          cat > /opt/olist-pipeline/.env << EOF
+          POSTGRES_PASSWORD=${DBPassword}
+          AWS_ACCESS_KEY_ID=${AwsAccessKeyId}
+          AWS_SECRET_ACCESS_KEY=${AwsSecretAccessKey}
+          AWS_SESSION_TOKEN=${AwsSessionToken}
+          AWS_DEFAULT_REGION=${AWS::Region}
+          PIPELINE_ENV=${PipelineEnv}
+          POSTGRES_HOST=$RDS_ENDPOINT
+          POSTGRES_PORT=$RDS_PORT
+          EOF
+
+          dnf install -y amazon-cloudwatch-agent
+          mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json << 'CWCONFIG'
+          {
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/docker/containers/*/*.log",
+                      "log_group_name": "olist-pipeline",
+                      "log_stream_name": "{instance_id}",
+                      "timestamp_format": "%Y-%m-%dT%H:%M:%S.%fZ"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          CWCONFIG
+          systemctl enable --now amazon-cloudwatch-agent || true
+
+          echo "Bootstrap completo"
+      Tags:
+        - Key: Name
+          Value: !Sub "olist-${EnvironmentName}-pipeline"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # =============================================
+  # CloudWatch Alarms e SNS
+  # =============================================
+  SNSAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "olist-${EnvironmentName}-alerts"
+      DisplayName: !Sub "Olist ${EnvironmentName} Alerts"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "olist-${EnvironmentName}-cpu-high"
+      AlarmDescription: "Alerta quando CPU do pipeline excede 80% por 5 minutos"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref PipelineInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSAlertTopic
+
+Outputs:
+  PipelineInstanceId:
+    Description: "ID da instância EC2 do pipeline"
+    Value: !Ref PipelineInstance
+
+  PipelineInstancePublicIP:
+    Description: "IP público da instância EC2"
+    Value: !GetAtt PipelineInstance.PublicIp
+
+  GrafanaURL:
+    Description: "URL do Grafana"
+    Value: !Sub "http://${PipelineInstance.PublicIp}:3000"
+
+  PrometheusURL:
+    Description: "URL do Prometheus"
+    Value: !Sub "http://${PipelineInstance.PublicIp}:9090"
+
+  PostgresEndpoint:
+    Description: "Endpoint do RDS Postgres"
+    Value: !GetAtt PostgresRDS.Endpoint.Address
+
+  S3BucketName:
+    Description: "Bucket S3 do ambiente atual"
+    Value: !Sub "olist-data-${EnvironmentName}-${AWS::AccountId}"
+
+  SNSAlertTopicARN:
+    Description: "ARN do tópico SNS de alertas"
+    Value: !Ref SNSAlertTopic

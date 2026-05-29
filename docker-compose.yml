@@ -1,0 +1,132 @@
+services:
+
+  postgres:
+    image: postgres:14
+    container_name: olist-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: olist_analytics
+      POSTGRES_USER: olist
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-olist_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U olist -d olist_analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - olist_network
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: olist-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - olist_network
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: olist-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: ""
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+    networks:
+      - olist_network
+
+  pipeline:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile
+    container_name: olist-pipeline
+    restart: unless-stopped
+    environment:
+      PIPELINE_ENV: dev
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: olist_analytics
+      POSTGRES_USER: olist
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-olist_password}
+      PROMETHEUS_PUSHGATEWAY: http://prometheus:9090
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./pipeline/app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - olist_network
+
+  k6:
+    image: grafana/k6:latest
+    container_name: olist-k6
+    profiles:
+      - test
+    environment:
+      BASE_URL: http://pipeline:8080
+    volumes:
+      - ./k6/scripts:/scripts
+    depends_on:
+      pipeline:
+        condition: service_started
+    networks:
+      - olist_network
+
+  influxdb:
+    image: influxdb:1.8
+    container_name: olist-influxdb
+    profiles:
+      - test
+      - monitoring
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      INFLUXDB_DB: k6
+      INFLUXDB_HTTP_MAX_BODY_SIZE: 0
+    networks:
+      - olist_network
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  olist_network:
+    driver: bridge

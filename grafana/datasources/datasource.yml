@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: Postgres
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: olist_analytics
+    user: olist
+    secureJsonData:
+      password: olist_password
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1400
+      timescaledb: false
+
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
